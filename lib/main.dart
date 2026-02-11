@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:async';
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -50,26 +53,126 @@ class SetupScreen extends StatefulWidget {
 class _SetupScreenState extends State<SetupScreen> {
   final TextEditingController _urlController = TextEditingController();
   final TextEditingController _tokenController = TextEditingController();
+  bool _isConnecting = false;
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    _tokenController.dispose();
+    super.dispose();
+  }
 
   Future<void> _handleConnect() async {
-    final url = _urlController.text.trim();
+    String url = _urlController.text.trim();
     final token = _tokenController.text.trim();
 
+    // 1. Basic validation
     if (url.isEmpty || token.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter both URL and Token')),
-      );
+      _showErrorModal('Input Required', 'Please enter both URL and Token');
       return;
     }
 
-    await ApiConfig.saveSettings(url, token);
-
-    if (mounted) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const HomeScreen()),
-      );
+    // Ensure URL has a protocol
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      _showErrorModal('Invalid URL', 'URL must start with http:// or https://');
+      return;
     }
+
+    // Remove trailing slash to avoid double slashes like //health
+    if (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+
+    setState(() => _isConnecting = true);
+
+    try {
+      // 2. Health check (Token is not needed for this endpoint as per requirements)
+      final response = await http
+          .get(Uri.parse('$url/health'))
+          .timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+
+        // 3. Verify the expected JSON structure
+        if (data['status'] == 'ok') {
+          // CONNECTION SUCCESSFUL!
+          if (!mounted) return;
+
+          // Show success modal
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (context) => AlertDialog(
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.check_circle, color: Colors.green, size: 60),
+                  SizedBox(height: 16),
+                  Text(
+                    'Connection Successful!',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                  ),
+                  SizedBox(height: 8),
+                  Text('The backend is reachable and healthy.'),
+                ],
+              ),
+            ),
+          );
+
+          await Future.delayed(const Duration(seconds: 2));
+          await ApiConfig.saveSettings(url, token);
+
+          if (!mounted) return;
+          Navigator.pop(context); // Close Dialog
+          if (!mounted) return;
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => const HomeScreen()),
+          );
+          return;
+        }
+      }
+
+      _showErrorModal('Health Check Failed', 'The server responded, but the health check did not pass.');
+    } on TimeoutException {
+      _showErrorModal('Connection Timeout', 'The server took too long to respond. Check if the URL is correct and the server is running.');
+    } catch (e) {
+      _showErrorModal('Connection Error', 'Could not connect to the backend. Please check your network and the provided URL.');
+    } finally {
+      if (mounted) setState(() => _isConnecting = false);
+    }
+  }
+
+  void _showErrorModal(String title, String message) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.cancel, color: Colors.red, size: 60),
+            const SizedBox(height: 16),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            ),
+            const SizedBox(height: 8),
+            Text(message, textAlign: TextAlign.center),
+          ],
+        ),
+        actions: [
+          Center(
+            child: TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -82,18 +185,26 @@ class _SetupScreenState extends State<SetupScreen> {
           children: [
             TextField(
               controller: _urlController,
-              decoration: const InputDecoration(labelText: 'Backend URL', hintText: 'https://api.example.com'),
+              enabled: !_isConnecting,
+              decoration: const InputDecoration(
+                labelText: 'Backend URL',
+                hintText: 'http://192.168.1.50:8000',
+              ),
             ),
             const SizedBox(height: 10),
             TextField(
               controller: _tokenController,
+              enabled: !_isConnecting,
+              obscureText: true,
               decoration: const InputDecoration(labelText: 'Access Token'),
             ),
             const SizedBox(height: 30),
-            ElevatedButton(
-              onPressed: _handleConnect,
-              child: const Text('Save & Connect'),
-            ),
+            _isConnecting
+                ? const CircularProgressIndicator()
+                : ElevatedButton(
+                    onPressed: _handleConnect,
+                    child: const Text('Verify & Connect'),
+                  ),
           ],
         ),
       ),
@@ -114,16 +225,17 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Pagination logic: trigger fetch near the bottom.
     _scrollController.addListener(() {
       if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 300) {
         context.read<MemeProvider>().fetchNextPage();
       }
     });
 
-    // Initial data fetch.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<MemeProvider>().fetchNextPage();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final provider = context.read<MemeProvider>();
+      final token = await ApiConfig.getToken();
+      provider.setToken(token);
+      provider.fetchNextPage();
     });
   }
 
@@ -152,6 +264,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (confirm == true) {
       await ApiConfig.clearSettings();
       if (mounted) {
+        context.read<MemeProvider>().reset();
         Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const SetupScreen()));
       }
     }
@@ -161,7 +274,6 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Meme Feed')),
-      // endDrawer
       endDrawer: Drawer(
         child: Column(
           children: [
@@ -176,7 +288,7 @@ class _HomeScreenState extends State<HomeScreen> {
               leading: const Icon(Icons.logout, color: Colors.red),
               title: const Text('Logout', style: TextStyle(color: Colors.red)),
               onTap: () {
-                Navigator.pop(context); // Close the drawer first
+                Navigator.pop(context);
                 _logout();
               },
             ),
@@ -191,6 +303,32 @@ class _HomeScreenState extends State<HomeScreen> {
             return const Center(child: CircularProgressIndicator());
           }
 
+          if (provider.errorMessage != null && provider.memes.isEmpty) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                    const SizedBox(height: 16),
+                    Text(
+                      provider.errorMessage!,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                    const SizedBox(height: 16),
+                    ElevatedButton.icon(
+                      onPressed: provider.refresh,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
           if (provider.memes.isEmpty) {
             return const Center(child: Text('No memes found. Check your API settings.'));
           }
@@ -201,11 +339,24 @@ class _HomeScreenState extends State<HomeScreen> {
               controller: _scrollController,
               itemCount: provider.memes.length + (provider.hasMore ? 1 : 0),
               itemBuilder: (context, index) {
-                // At the end of the list show a loader.
                 if (index == provider.memes.length) {
+                  if (provider.errorMessage != null) {
+                    return Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Center(
+                        child: Column(
+                          children: [
+                            Text(provider.errorMessage!, style: const TextStyle(color: Colors.red)),
+                            const SizedBox(height: 8),
+                            TextButton(onPressed: provider.fetchNextPage, child: const Text('Retry')),
+                          ],
+                        ),
+                      ),
+                    );
+                  }
                   return const Padding(padding: EdgeInsets.all(20), child: Center(child: CircularProgressIndicator()));
                 }
-                return MemeCard(meme: provider.memes[index]);
+                return MemeCard(meme: provider.memes[index], token: provider.token);
               },
             ),
           );
@@ -217,7 +368,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
 class MemeCard extends StatelessWidget {
   final Meme meme;
-  const MemeCard({super.key, required this.meme});
+  final String? token;
+  const MemeCard({super.key, required this.meme, this.token});
 
   @override
   Widget build(BuildContext context) {
@@ -229,6 +381,7 @@ class MemeCard extends StatelessWidget {
         children: [
           CachedNetworkImage(
             imageUrl: meme.previewUrl,
+            httpHeaders: token != null ? {'Authorization': 'Bearer $token'} : {},
             width: double.infinity,
             height: 250,
             fit: BoxFit.cover,
@@ -247,10 +400,24 @@ class MemeCard extends StatelessWidget {
                     Icon(meme.type == MediaType.video ? Icons.play_circle_outline : Icons.image_outlined, color: Colors.grey),
                   ],
                 ),
-                if (meme.description != null) ...[
-                  const SizedBox(height: 4),
-                  Text(meme.description!, style: TextStyle(color: Colors.grey[600], fontSize: 14)),
-                ]
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6.0,
+                  runSpacing: 6.0,
+                  children: [
+                    if (meme.category != null)
+                      Chip(
+                        label: Text(meme.category!),
+                        backgroundColor: Colors.blue[100],
+                        labelStyle: const TextStyle(fontSize: 12),
+                      ),
+                    ...meme.keywords.map((keyword) => Chip(
+                      label: Text(keyword),
+                      backgroundColor: Colors.grey[200],
+                      labelStyle: const TextStyle(fontSize: 12),
+                    )),
+                  ],
+                )
               ],
             ),
           ),
