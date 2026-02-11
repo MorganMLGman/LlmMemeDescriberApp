@@ -13,7 +13,7 @@ void main() async {
 
   // Check auth state from local storage (persistence).
   String? savedUrl = await ApiConfig.getUrl();
-
+  
   runApp(
     MultiProvider(
       providers: [
@@ -385,8 +385,8 @@ class MemeCard extends StatelessWidget {
             width: double.infinity,
             height: 250,
             fit: BoxFit.cover,
-            placeholder: (_, __) => Container(color: Colors.grey[200], child: const Center(child: CircularProgressIndicator())),
-            errorWidget: (_, __, ___) => const Icon(Icons.broken_image, size: 50),
+            placeholder: (_, _) => Container(color: Colors.grey[200], child: const Center(child: CircularProgressIndicator())),
+            errorWidget: (_, _, _) => const Icon(Icons.broken_image, size: 50),
           ),
           Padding(
             padding: const EdgeInsets.all(12),
